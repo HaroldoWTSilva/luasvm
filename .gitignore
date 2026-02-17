@@ -1,0 +1,5 @@
+build/*
+plot.txt
+vgcore.*
+*.dat
+gmon.out

@@ -1,0 +1,203 @@
+local svm = {}
+
+svm.fit = function(pontos, kernel, C)
+	-- column major "matrix" of K(x_i, x_j) 
+	local y = {} --vetor de rotulos
+	local n = #pontos
+	local c -- o vetor solucao
+	local supi=0 --indice de um vetor de suporte
+	local b --bias do plano
+    local kfunc -- funcao de kernel para o SMO
+
+	if n < 2 then
+		print(n," pontos é muito pouco!")
+		return nil
+	end
+
+	local pointsdat = io.open("points.dat", "w")
+    if pointsdat then
+        --i é linha, j é coluna
+        for i = 1,n do
+            pointsdat:write(pontos[i].point[1].." "..pontos[i].point[2].." "..(pontos[i].label and 1 or -1 ).."\n" )
+            y[i] = (pontos[i].label and 1.0) or -1.0
+        end
+	pointsdat:close()
+    end
+	kfunc = function(i, j)
+		return kernel(pontos[i].point, pontos[j].point)
+	end
+
+    --c = SMO.solve_wss3(kfunc, y, C)
+    c = svm.chinksolve(kfunc, y, C)
+
+	print(#c,"vetores de suporte")
+	local svdat = io.open("sv.dat", "w")
+    if svdat then
+        for i,ci in next,c do
+            print("c",i,ci)
+            svdat:write(pontos[i].point[1].." "..pontos[i].point[2].." "..(pontos[i].label and 1 or -1 ).."\n" )
+        end
+        svdat:close()
+    end
+    --um vetor de suporte deve ser escolhido
+    for i,ci in next,c do
+        if ci > 0 and ci < C and i > supi then
+            supi = i
+        end
+    end
+
+	--calculando b (direto da wikipedia)
+	--D(i,j) = K(i,j)*yi*yj
+	b = 0.0 - y[supi]
+	for j,cj in next,c do
+		b = b + cj*y[j]*kfunc(supi, j)
+	end
+
+	print("b:",b)
+
+	return function(z)
+		local rsum = 0.0
+		for i,ci in next,c do
+			rsum = rsum + ci*y[i]*kernel(pontos[i].point, z )
+		end
+		return (rsum - b) > 0
+	end
+end
+
+--algoritmo SMO + WSS3
+--https://www.csie.ntu.edu.tw/~cjlin/papers/quadworkset.pdf
+svm.chinksolve = function(Kfunc, y, C )
+
+local len = #y
+local eps = 1e-3
+local tau = 1e-12
+local A = {}
+local G = {}
+local i
+local j
+local a
+local oldAi
+local oldAj
+local sum
+local deltaAi
+local deltaAj
+local b
+local yi
+local yj
+local Q = {}
+
+for it=1,len do
+	A[it] = 0.0
+	G[it] = -1.0
+    Q[it] = {}
+    for jt=1,len do
+        Q[it][jt] = Kfunc(it, jt)*y[it]*y[jt]
+    end
+end
+
+while true do
+	i,j = svm.selectB(Q, A, G, y, C, tau, eps)
+	yi = y[i]
+	yj = y[j]
+	if (j == -1) then
+		break
+	end
+	a = Q[i][i] + Q[j][j] - 2*yi*yj*Q[i][j]
+	if (a <= 0) then
+		a = tau
+	end
+	b = -1.0*yi*G[i] + yj*G[j]
+
+	--update alpha
+	oldAi = A[i]
+	oldAj = A[j]
+	A[i] = A[i] + yi*b/a
+	A[j] = A[j] - yj*b/a
+
+	--project alpha back to the feasible region
+	sum = yi*oldAi + yj*oldAj
+	if A[i] > C then
+		A[i] = C
+	elseif A[i] < 0.0 then
+		A[i] = 0.0
+	end
+	A[j] = yj*(sum -yi*A[i])
+	if A[j] > C then
+		A[j] = C
+	elseif A[j] < 0.0 then
+		A[j] = 0.0
+	end
+	A[i] = yi*(sum -yj*A[j])
+
+	--update gradient
+	deltaAi = A[i] - oldAi
+	deltaAj = A[j] - oldAj
+	for t = 1,len do
+		G[t] = G[t] + Q[t][i]*deltaAi + Q[t][j]*deltaAj
+	end
+end
+	local ret = {}
+	for t=1,len do
+		if (A[t]*A[t] > tau) then
+			ret[t] = A[t]
+		end
+	end
+	return ret
+
+end
+
+svm.selectB = function(Q, A, G, y, C, tau, eps)
+	local i = -1
+	local j
+	local len = #y
+	local G_max = "inf"
+	local G_min = "-inf"
+	local b
+	local yt
+	local Qi
+    local obj_min
+    local a
+
+	for t = 1,len do
+		yt = y[t]
+		if (yt == 1 and A[t] < C) or
+			(yt == -1 and A[t] > 0) then
+			if (G_max == "inf" or -yt*G[t] >= G_max) then
+				i = t
+				G_max = -1*yt*G[t]
+			end
+		end
+	end
+
+	Qi = Q[i]
+
+	j = -1
+	obj_min = "inf"
+	for t=1,len do
+		yt = y[t]
+		if (yt == 1 and A[t] > 0) or
+			(yt == -1 and A[t] < C) then
+			b = G_max + yt*G[t]
+			if (G_min == "-inf" or -1*yt*G[t] <= G_min) then
+				G_min = -1*yt*G[t]
+			end
+			if (b >0) then
+				a=Qi[i]+Q[t][t]-2*y[i]*yt*Qi[t]
+				if (a <= 0) then
+					a = tau
+				end
+				if (obj_min == "inf" or -1*(b*b)/a <= obj_min) then
+					j = t
+					obj_min = -1*(b*b)*a
+				end
+			end
+		end
+	end
+	if (G_max-G_min < eps) then
+		return -1,-1
+	else
+		return i,j
+	end
+end
+
+return svm
